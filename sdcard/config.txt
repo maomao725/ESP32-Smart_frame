@@ -1,0 +1,6 @@
+{
+  "wifi_ssid": "maomao",
+  "wifi_password": "y20050725",
+  "server_url": "http://47.108.232.40:2026/imget/imget2.php?file=123.jpg",
+  "poll_interval": 30
+}

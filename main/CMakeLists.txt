@@ -1,0 +1,25 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "wifi_sta.c"
+        "frame_config.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        epaper_src
+        epaper_port
+        axp2101_bsp
+        i2c_bsp
+        sdcard_bsp
+        photo_client
+        ListLib
+        esp_wifi
+        esp_http_client
+        nvs_flash
+        esp_event
+        esp_netif
+        driver
+        fatfs
+        sdmmc
+        http_server_bsp
+        json
+)
