@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能相框配网</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+            text-align: center;
+        }
+        .subtitle {
+            color: #666;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        input, select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        .wifi-list {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        .wifi-item {
+            padding: 12px 15px;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: pointer;
+            transition: background 0.2s ease;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .wifi-item:hover {
+            background: #f8f9ff;
+        }
+        .wifi-item.selected {
+            background: #667eea;
+            color: white;
+        }
+        .wifi-ssid {
+            font-weight: 600;
+        }
+        .wifi-rssi {
+            font-size: 12px;
+            color: #999;
+        }
+        .wifi-item.selected .wifi-rssi {
+            color: rgba(255, 255, 255, 0.8);
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+        button:active {
+            transform: translateY(0);
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .refresh-btn {
+            background: #f0f0f0;
+            color: #333;
+            margin-bottom: 15px;
+            padding: 10px;
+        }
+        .refresh-btn:hover {
+            background: #e0e0e0;
+            transform: none;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 14px;
+            text-align: center;
+            display: none;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 10px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .mqtt-section {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 2px dashed #e0e0e0;
+        }
+        .mqtt-mode {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .mqtt-mode button {
+            padding: 12px 16px;
+            border: 2px solid #d8dcff;
+            background: #f7f8ff;
+            color: #4a4f72;
+            box-shadow: none;
+            transform: none;
+        }
+        .mqtt-mode button:hover {
+            transform: none;
+            box-shadow: none;
+            background: #eef1ff;
+        }
+        .mqtt-mode button.active {
+            border-color: #667eea;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .mqtt-summary {
+            padding: 12px 14px;
+            border-radius: 12px;
+            background: #f7f8ff;
+            color: #4a4f72;
+            font-size: 13px;
+            line-height: 1.6;
+            margin-bottom: 16px;
+        }
+        .mqtt-summary strong {
+            color: #2f3558;
+        }
+        .mqtt-hint {
+            color: #666;
+            font-size: 13px;
+            margin-top: -6px;
+            margin-bottom: 16px;
+        }
+        .mqtt-toggle {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+            cursor: pointer;
+        }
+        .mqtt-toggle input {
+            width: auto;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📷 智能相框配网</h1>
+        <p class="subtitle">请选择家庭 Wi-Fi 并输入密码</p>
+
+        <div class="form-group">
+            <label>选择 Wi-Fi</label>
+            <button class="refresh-btn" onclick="scanWiFi()">🔄 刷新 Wi-Fi 列表</button>
+            <div class="wifi-list" id="wifiList">
+                <div style="padding: 20px; text-align: center; color: #999;">
+                    点击上方按钮扫描附近的 Wi-Fi
+                </div>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="ssid">Wi-Fi 名称</label>
+            <input type="text" id="ssid" placeholder="请选择或手动输入 Wi-Fi 名称" oninput="syncManualSsid()">
+        </div>
+
+        <div class="form-group">
+            <label for="password">Wi-Fi 密码</label>
+            <input type="password" id="password" placeholder="请输入 Wi-Fi 密码">
+        </div>
+
+        <div class="mqtt-section">
+            <label>MQTT 服务器</label>
+            <div class="mqtt-mode">
+                <button type="button" id="mqttDefaultBtn" class="active" onclick="setMqttMode('default')">使用默认 MQTT</button>
+                <button type="button" id="mqttCustomBtn" onclick="setMqttMode('custom')">客户自定义</button>
+            </div>
+            <div class="mqtt-summary">
+                <div><strong>默认地址：</strong><span id="defaultMqttUrlLabel"></span></div>
+                <div><strong>默认账号：</strong><span id="defaultMqttUserLabel"></span></div>
+            </div>
+
+            <div id="mqttFields" style="display: none;">
+                <div class="form-group">
+                    <label for="mqttUrl">MQTT 服务器地址</label>
+                    <input type="text" id="mqttUrl" placeholder="例如: mqtt://1.2.3.4:1883">
+                </div>
+                <div class="form-group">
+                    <label for="mqttUser">MQTT 用户名（可选）</label>
+                    <input type="text" id="mqttUser" placeholder="用户名">
+                </div>
+                <div class="form-group">
+                    <label for="mqttPass">MQTT 密码（可选）</label>
+                    <input type="password" id="mqttPass" placeholder="密码">
+                </div>
+            </div>
+            <div class="mqtt-hint" id="mqttHint">未切换时将自动使用设备内置的默认 MQTT 配置。</div>
+        </div>
+
+        <button id="connectBtn" onclick="connect()" disabled>🔗 连接 Wi-Fi</button>
+
+        <div class="status" id="status"></div>
+    </div>
+
+    <script>
+        const DEFAULT_MQTT = {
+            url: 'mqtt://47.108.232.40:1883',
+            user: 'screen_test1',
+            pass: 'screen_test1'
+        };
+
+        let selectedWifi = null;
+        let mqttMode = 'default';
+
+        function fillDefaultMqttFields() {
+            document.getElementById('mqttUrl').value = DEFAULT_MQTT.url;
+            document.getElementById('mqttUser').value = DEFAULT_MQTT.user;
+            document.getElementById('mqttPass').value = DEFAULT_MQTT.pass;
+            document.getElementById('defaultMqttUrlLabel').textContent = DEFAULT_MQTT.url;
+            document.getElementById('defaultMqttUserLabel').textContent = DEFAULT_MQTT.user;
+        }
+
+        function scanWiFi() {
+            const wifiList = document.getElementById('wifiList');
+            wifiList.innerHTML = '<div style="padding: 20px; text-align: center; color: #999;">正在扫描...</div>';
+
+            fetch('/api/scan')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.length === 0) {
+                        wifiList.innerHTML = '<div style="padding: 20px; text-align: center; color: #999;">未找到 Wi-Fi 网络</div>';
+                        return;
+                    }
+
+                    wifiList.innerHTML = '';
+                    data.forEach(ap => {
+                        const item = document.createElement('div');
+                        item.className = 'wifi-item';
+                        item.innerHTML = `
+                            <span class="wifi-ssid">${ap.ssid}</span>
+                            <span class="wifi-rssi">${getRssiText(ap.rssi)}</span>
+                        `;
+                        item.onclick = () => selectWifi(ap, item);
+                        wifiList.appendChild(item);
+                    });
+                })
+                .catch(error => {
+                    wifiList.innerHTML = '<div style="padding: 20px; text-align: center; color: #f44336;">扫描失败，请重试</div>';
+                    console.error('Scan error:', error);
+                });
+        }
+
+        function getRssiText(rssi) {
+            if (rssi >= -50) return '📶 强';
+            if (rssi >= -60) return '📶 良好';
+            if (rssi >= -70) return '📶 中等';
+            return '📶 较弱';
+        }
+
+        function selectWifi(ap, element) {
+            selectedWifi = ap;
+
+            document.querySelectorAll('.wifi-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            element.classList.add('selected');
+
+            document.getElementById('ssid').value = ap.ssid;
+            document.getElementById('connectBtn').disabled = false;
+
+            if (ap.auth === 0) {
+                document.getElementById('password').value = '';
+                document.getElementById('password').disabled = true;
+                document.getElementById('password').placeholder = '开放网络，无需密码';
+            } else {
+                document.getElementById('password').disabled = false;
+                document.getElementById('password').placeholder = '请输入 Wi-Fi 密码';
+                document.getElementById('password').focus();
+            }
+        }
+
+        function syncManualSsid() {
+            const ssid = document.getElementById('ssid').value.trim();
+            const passwordInput = document.getElementById('password');
+
+            selectedWifi = null;
+            document.querySelectorAll('.wifi-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            passwordInput.disabled = false;
+            passwordInput.placeholder = '请输入 Wi-Fi 密码';
+            document.getElementById('connectBtn').disabled = ssid.length === 0;
+        }
+
+        function setMqttMode(mode) {
+            mqttMode = mode;
+            const mqttFields = document.getElementById('mqttFields');
+            const defaultBtn = document.getElementById('mqttDefaultBtn');
+            const customBtn = document.getElementById('mqttCustomBtn');
+            const mqttHint = document.getElementById('mqttHint');
+
+            defaultBtn.classList.toggle('active', mode === 'default');
+            customBtn.classList.toggle('active', mode === 'custom');
+            mqttFields.style.display = mode === 'custom' ? 'block' : 'none';
+            mqttHint.textContent = mode === 'custom'
+                ? '客户可在这里改成自己的 MQTT 地址、用户名和密码。'
+                : '未切换时将自动使用设备内置的默认 MQTT 配置。';
+        }
+
+        function connect() {
+            const ssid = document.getElementById('ssid').value;
+            const password = document.getElementById('password').value;
+            const useCustomMqtt = mqttMode === 'custom';
+
+            if (!ssid) {
+                showStatus('请选择 Wi-Fi 网络', 'error');
+                return;
+            }
+
+            const data = {
+                ssid: ssid,
+                password: password,
+                use_custom_mqtt: useCustomMqtt
+            };
+
+            if (useCustomMqtt) {
+                if (!document.getElementById('mqttUrl').value.trim()) {
+                    showStatus('自定义 MQTT 时，服务器地址不能为空', 'error');
+                    return;
+                }
+                data.mqtt_url = document.getElementById('mqttUrl').value;
+                data.mqtt_user = document.getElementById('mqttUser').value;
+                data.mqtt_pass = document.getElementById('mqttPass').value;
+            }
+
+            const btn = document.getElementById('connectBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span>正在连接...';
+
+            fetch('/api/connect', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            })
+            .then(async response => {
+                const text = await response.text();
+                let result = {};
+
+                if (text) {
+                    try {
+                        result = JSON.parse(text);
+                    } catch (error) {
+                        result = { message: text };
+                    }
+                }
+
+                if (!response.ok) {
+                    throw new Error(result.message || `HTTP ${response.status}`);
+                }
+
+                return result;
+            })
+            .then(result => {
+                if (result.status === 'ok') {
+                    showStatus('✓ 配置已接收，设备正在连接 Wi-Fi...', 'success');
+
+                    setTimeout(() => {
+                        showStatus('请查看设备屏幕，等待连接完成并获取绑定码', 'info');
+                    }, 3000);
+                } else {
+                    showStatus('连接失败: ' + (result.message || '未知错误'), 'error');
+                    btn.disabled = false;
+                    btn.innerHTML = '🔗 连接 Wi-Fi';
+                }
+            })
+            .catch(error => {
+                const likelySoftApSwitch = error.message === 'Failed to fetch';
+                if (likelySoftApSwitch) {
+                    showStatus('请求大概率已提交，设备正在切换网络；若页面断开，请直接看墨水屏状态。', 'info');
+                    return;
+                }
+
+                showStatus('连接失败: ' + error.message, 'error');
+                btn.disabled = false;
+                btn.innerHTML = '🔗 连接 Wi-Fi';
+            });
+        }
+
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = 'status ' + type;
+            status.style.display = 'block';
+        }
+
+        // 自动扫描一次
+        window.onload = () => {
+            fillDefaultMqttFields();
+            setMqttMode('default');
+            setTimeout(scanWiFi, 500);
+        };
+    </script>
+</body>
+</html>

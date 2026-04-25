@@ -12,6 +12,8 @@
 
 static const char *TAG = "photo_client";
 
+#define PHOTO_INCOMING_PATH          "/sdcard/incoming.bmp"
+#define PHOTO_CURRENT_PATH           "/sdcard/current.bmp"
 #define PHOTO_HTTP_CLIENT_BUF_SIZE 2048
 #define PHOTO_HTTP_RX_BUF_SIZE     4096
 #define PHOTO_FILE_IO_BUF_SIZE     2048
@@ -147,7 +149,6 @@ static esp_err_t validate_bmp_file(const char *path, size_t actual_size) {
 }
 
 static esp_err_t download_once(const char *url) {
-    const char *tmp_path = "/sdcard/incoming.bmp";
     esp_err_t err = ESP_OK;
     esp_http_client_handle_t client = NULL;
     uint8_t *rx_buf = NULL;
@@ -161,7 +162,7 @@ static esp_err_t download_once(const char *url) {
     int64_t content_length = 0;
     bool chunked = false;
 
-    remove(tmp_path);
+    remove(PHOTO_INCOMING_PATH);
 
     esp_http_client_config_t config = {
         .url                   = url,
@@ -226,9 +227,9 @@ static esp_err_t download_once(const char *url) {
         goto cleanup;
     }
 
-    fp = fopen(tmp_path, "wb");
+    fp = fopen(PHOTO_INCOMING_PATH, "wb");
     if (!fp) {
-        ESP_LOGE(TAG, "Cannot open %s for writing", tmp_path);
+        ESP_LOGE(TAG, "Cannot open %s for writing", PHOTO_INCOMING_PATH);
         err = ESP_FAIL;
         goto cleanup;
     }
@@ -312,7 +313,7 @@ static esp_err_t download_once(const char *url) {
         goto cleanup;
     }
 
-    err = validate_bmp_file(tmp_path, total_written);
+    err = validate_bmp_file(PHOTO_INCOMING_PATH, total_written);
     if (err != ESP_OK) {
         goto cleanup;
     }
@@ -346,18 +347,27 @@ cleanup:
         err = ESP_FAIL;  /* treat stall as retryable failure */
     }
     if (err != ESP_OK) {
-        remove(tmp_path);
+        remove(PHOTO_INCOMING_PATH);
     }
     return err;
 }
 
-esp_err_t photo_client_fetch(const char *base_url, const char *device_id) {
-    char url[320];
-    if (device_id && device_id[0] != '\0') {
-        snprintf(url, sizeof(url), "%s/%s/latest.bmp", base_url, device_id);
-    } else {
-        snprintf(url, sizeof(url), "%s", base_url);
+static esp_err_t finalize_download(void) {
+    remove(PHOTO_CURRENT_PATH);
+    if (rename(PHOTO_INCOMING_PATH, PHOTO_CURRENT_PATH) != 0) {
+        ESP_LOGE(TAG, "Failed to rename incoming photo to current photo");
+        return ESP_FAIL;
     }
+
+    ESP_LOGI(TAG, "Photo saved to %s", PHOTO_CURRENT_PATH);
+    return ESP_OK;
+}
+
+esp_err_t photo_client_fetch_url(const char *url) {
+    if (!url || url[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     ESP_LOGI(TAG, "Fetching: %s", url);
 
     esp_err_t err = ESP_FAIL;
@@ -385,13 +395,25 @@ esp_err_t photo_client_fetch(const char *base_url, const char *device_id) {
         return err;
     }
 
-    /* Atomically replace current photo */
-    remove("/sdcard/current.bmp");
-    if (rename("/sdcard/incoming.bmp", "/sdcard/current.bmp") != 0) {
-        ESP_LOGE(TAG, "Failed to rename incoming.bmp -> current.bmp");
-        return ESP_FAIL;
+    return finalize_download();
+}
+
+esp_err_t photo_client_fetch(const char *base_url, const char *device_id) {
+    char url[320];
+
+    if (!base_url || base_url[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Photo saved to /sdcard/current.bmp");
-    return ESP_OK;
+    if (device_id && device_id[0] != '\0') {
+        snprintf(url, sizeof(url), "%s/%s/latest.bmp", base_url, device_id);
+    } else {
+        snprintf(url, sizeof(url), "%s", base_url);
+    }
+
+    return photo_client_fetch_url(url);
+}
+
+const char *photo_client_current_path(void) {
+    return PHOTO_CURRENT_PATH;
 }

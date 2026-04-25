@@ -11,13 +11,18 @@ extern "C" {
  * Download the latest photo for device_id from server and save to SD card.
  *
  * URL pattern: {base_url}/{device_id}/latest.bmp
- * Saves to: /sdcard/current.bmp
- *
- * Returns ESP_OK if a new photo was downloaded and saved.
- * Returns ESP_ERR_NOT_FOUND if server returns 404 (no new photo).
- * Returns ESP_FAIL on network or write error.
  */
 esp_err_t photo_client_fetch(const char *base_url, const char *device_id);
+
+/**
+ * Download a photo from a full HTTP(S) URL and save it to the current photo path.
+ */
+esp_err_t photo_client_fetch_url(const char *url);
+
+/**
+ * Return the SD-card path of the current photo file.
+ */
+const char *photo_client_current_path(void);
 
 #ifdef __cplusplus
 }

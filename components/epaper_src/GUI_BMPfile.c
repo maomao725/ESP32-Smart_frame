@@ -535,10 +535,10 @@ UBYTE GUI_ReadBmp_RGB_6Color(const char *path, UWORD Xstart, UWORD Ystart)
             UBYTE color;
             if      (r == 0   && g == 0   && b == 0  ) color = 0; /* Black  */
             else if (r == 255 && g == 255 && b == 255 ) color = 1; /* White  */
-            else if (r == 0   && g == 255 && b == 255 ) color = 2; /* Yellow */
-            else if (r == 0   && g == 0   && b == 255 ) color = 3; /* Red    */
-            else if (r == 255 && g == 0   && b == 0  ) color = 5; /* Blue   */
-            else if (r == 0   && g == 255 && b == 0  ) color = 6; /* Green  */
+            else if (r == 255 && g == 255 && b == 0  ) color = 2; /* Yellow */
+            else if (r == 255 && g == 0   && b == 0  ) color = 3; /* Red    */
+            else if (r == 0   && g == 0   && b == 255 ) color = 5; /* Blue   */
+            else if (r == 0   && b == 0   && g > 0   ) color = 6; /* Green (any pure green: 128 or 255) */
             else                                        color = 1; /* default White */
             if (Xstart + x < Paint.Width && Ystart + paint_y < Paint.Height) {
                 Paint_SetPixel(Xstart + x, Ystart + paint_y, color);

@@ -11,6 +11,8 @@ idf_component_register(
         i2c_bsp
         sdcard_bsp
         photo_client
+        mqtt_photo_client
+        softap_prov
         ListLib
         esp_wifi
         esp_http_client
@@ -21,5 +23,8 @@ idf_component_register(
         fatfs
         sdmmc
         http_server_bsp
+        json_bsp
         json
+        efuse
+        mqtt
 )
