@@ -33,6 +33,7 @@ static const char *TAG = "smart_frame";
 
 static uint8_t  *s_img_buf  = NULL;
 static uint32_t  s_img_size = 0;
+static SemaphoreHandle_t s_display_lock = NULL;
 
 static void log_heap(const char *stage)
 {
@@ -73,15 +74,52 @@ static bool epaper_init_buffer(void)
     Paint_SetScale(6);
     Paint_SelectImage(s_img_buf);
     Paint_SetRotate(180);
+
+    if (!s_display_lock) {
+        s_display_lock = xSemaphoreCreateMutex();
+        if (!s_display_lock) {
+            ESP_LOGE(TAG, "Display mutex alloc failed");
+            return false;
+        }
+    }
     return true;
+}
+
+static bool take_display_lock(void)
+{
+    return !s_display_lock || xSemaphoreTake(s_display_lock, portMAX_DELAY) == pdTRUE;
+}
+
+static void give_display_lock(void)
+{
+    if (s_display_lock) {
+        xSemaphoreGive(s_display_lock);
+    }
+}
+
+static void draw_softap_screen_locked(const char *device_id,
+                                      const char *ap_name,
+                                      const char *ap_ip,
+                                      const char *bind_code,
+                                      softap_state_t state)
+{
+    if (!s_img_buf || !take_display_lock()) {
+        return;
+    }
+
+    softap_prov_draw_screen(s_img_buf, device_id, ap_name, ap_ip, bind_code, state);
+    epaper_port_display(s_img_buf);
+    give_display_lock();
 }
 
 static void display_photo(const char *path)
 {
     if (!s_img_buf) return;
+    if (!take_display_lock()) return;
     Paint_Clear(EPD_7IN3E_WHITE);
     GUI_ReadBmp_RGB_6Color(path, 0, 0);
     epaper_port_display(s_img_buf);
+    give_display_lock();
     ESP_LOGI(TAG, "Display refreshed: %s", path);
 }
 
@@ -304,11 +342,8 @@ static void enter_softap_prov_mode(const char *device_id)
     ESP_LOGI(TAG, "SoftAP started: IP=%s", ap_ip);
 
     /* Draw initial screen */
-    if (s_img_buf) {
-        softap_prov_draw_screen(s_img_buf, device_id, ap_name, ap_ip, NULL, SOFTAP_STATE_IDLE);
-        epaper_port_display(s_img_buf);
-        ESP_LOGI(TAG, "Provisioning screen shown");
-    }
+    draw_softap_screen_locked(device_id, ap_name, ap_ip, NULL, SOFTAP_STATE_IDLE);
+    ESP_LOGI(TAG, "Provisioning screen shown");
 
     /* Block until credentials arrive via HTTP */
     ESP_LOGI(TAG, "Waiting for WiFi credentials via HTTP...");
@@ -319,10 +354,7 @@ static void enter_softap_prov_mode(const char *device_id)
     s_prov_evt = NULL;
 
     /* Update screen: connecting */
-    if (s_img_buf) {
-        softap_prov_draw_screen(s_img_buf, device_id, ap_name, ap_ip, NULL, SOFTAP_STATE_CONNECTING);
-        epaper_port_display(s_img_buf);
-    }
+    draw_softap_screen_locked(device_id, ap_name, ap_ip, NULL, SOFTAP_STATE_CONNECTING);
 
     /*
      * Stop SoftAP first, then re-enter the official STA init path.
@@ -335,10 +367,7 @@ static void enter_softap_prov_mode(const char *device_id)
     esp_err_t ret = wifi_sta_connect(s_prov_creds.ssid, s_prov_creds.password);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connect failed");
-        if (s_img_buf) {
-            softap_prov_draw_screen(s_img_buf, device_id, ap_name, ap_ip, NULL, SOFTAP_STATE_FAILED);
-            epaper_port_display(s_img_buf);
-        }
+        draw_softap_screen_locked(device_id, ap_name, ap_ip, NULL, SOFTAP_STATE_FAILED);
         vTaskDelay(pdMS_TO_TICKS(5000));
         esp_restart();
     }
@@ -367,10 +396,7 @@ static void enter_softap_prov_mode(const char *device_id)
              cfg->mqtt_username[0] ? cfg->mqtt_username : "(empty)");
 
     /* Request bind code from server */
-    if (s_img_buf) {
-        softap_prov_draw_screen(s_img_buf, device_id, ap_name, ap_ip, NULL, SOFTAP_STATE_GETTING_BIND_CODE);
-        epaper_port_display(s_img_buf);
-    }
+    draw_softap_screen_locked(device_id, ap_name, ap_ip, NULL, SOFTAP_STATE_GETTING_BIND_CODE);
     bind_code_result_t *bind_result = calloc(1, sizeof(*bind_result));
     if (!bind_result) {
         ESP_LOGE(TAG, "Bind result alloc failed");
@@ -384,10 +410,7 @@ static void enter_softap_prov_mode(const char *device_id)
         strncpy(cfg->bind_code, bind_result->bind_code, sizeof(cfg->bind_code) - 1);
         cfg->bind_code_expires = bind_result->expires_at;
         ESP_LOGI(TAG, "Bind code obtained: %s", cfg->bind_code);
-        if (s_img_buf) {
-            softap_prov_draw_screen(s_img_buf, device_id, ap_name, ap_ip, cfg->bind_code, SOFTAP_STATE_CONNECTED);
-            epaper_port_display(s_img_buf);
-        }
+        draw_softap_screen_locked(device_id, ap_name, ap_ip, cfg->bind_code, SOFTAP_STATE_CONNECTED);
     } else {
         ESP_LOGW(TAG, "Failed to get bind code — continuing without it");
     }
@@ -442,7 +465,7 @@ static void show_bind_waiting_screen(const frame_config_t *cfg)
 {
     softap_state_t state = SOFTAP_STATE_WAITING_BIND;
 
-    if (!s_img_buf || !cfg) {
+    if (!cfg) {
         return;
     }
 
@@ -450,13 +473,11 @@ static void show_bind_waiting_screen(const frame_config_t *cfg)
         state = SOFTAP_STATE_GETTING_BIND_CODE;
     }
 
-    softap_prov_draw_screen(s_img_buf,
-                            cfg->device_id,
-                            "",
-                            "",
-                            cfg->bind_code[0] ? cfg->bind_code : NULL,
-                            state);
-    epaper_port_display(s_img_buf);
+    draw_softap_screen_locked(cfg->device_id,
+                              "",
+                              "",
+                              cfg->bind_code[0] ? cfg->bind_code : NULL,
+                              state);
 }
 
 static bool refresh_bind_status_from_cloud(frame_config_t *cfg)
@@ -515,10 +536,7 @@ static void wait_for_bind_completion(frame_config_t *cfg, bool use_mqtt_wait)
             /* MQTT timed out — fall back to HTTP bind status check */
             ESP_LOGI(TAG, "MQTT bind timeout, checking bind status via HTTP...");
             if (refresh_bind_status_from_cloud(cfg)) {
-                if (s_img_buf) {
-                    softap_prov_draw_screen(s_img_buf, cfg->device_id, "", "", NULL, SOFTAP_STATE_BOUND);
-                    epaper_port_display(s_img_buf);
-                }
+                draw_softap_screen_locked(cfg->device_id, "", "", NULL, SOFTAP_STATE_BOUND);
                 vTaskDelay(pdMS_TO_TICKS(BIND_STATE_SETTLE_MS));
                 ESP_LOGI(TAG, "Bind confirmed via HTTP fallback, rebooting");
                 esp_restart();
@@ -535,15 +553,7 @@ static void wait_for_bind_completion(frame_config_t *cfg, bool use_mqtt_wait)
 
     while (1) {
         if (refresh_bind_status_from_cloud(cfg)) {
-            if (s_img_buf) {
-                softap_prov_draw_screen(s_img_buf,
-                                        cfg->device_id,
-                                        "",
-                                        "",
-                                        NULL,
-                                        SOFTAP_STATE_BOUND);
-                epaper_port_display(s_img_buf);
-            }
+            draw_softap_screen_locked(cfg->device_id, "", "", NULL, SOFTAP_STATE_BOUND);
             vTaskDelay(pdMS_TO_TICKS(BIND_STATE_SETTLE_MS));
             ESP_LOGI(TAG, "Initial bind complete, rebooting into photo mode");
             esp_restart();
@@ -628,15 +638,7 @@ static void on_bound_received(void *user_ctx)
         ESP_LOGW(TAG, "Failed to persist BIND_STATUS_BOUND from MQTT event");
     }
 
-    if (s_img_buf) {
-        softap_prov_draw_screen(s_img_buf,
-                                cfg->device_id,
-                                "",
-                                "",
-                                NULL,
-                                SOFTAP_STATE_BOUND);
-        epaper_port_display(s_img_buf);
-    }
+    draw_softap_screen_locked(cfg->device_id, "", "", NULL, SOFTAP_STATE_BOUND);
 
     if (s_bind_evt) {
         xEventGroupSetBits(s_bind_evt, BIND_CONFIRMED_BIT);
@@ -665,7 +667,10 @@ static void show_cached_photo_or_clear(void)
         fclose(f);
         display_photo(FRAME_PHOTO_PATH);
     } else {
-        epaper_port_clear(s_img_buf, EPD_7IN3E_WHITE);
+        if (s_img_buf && take_display_lock()) {
+            epaper_port_clear(s_img_buf, EPD_7IN3E_WHITE);
+            give_display_lock();
+        }
     }
 }
 

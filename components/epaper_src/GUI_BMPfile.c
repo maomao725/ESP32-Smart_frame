@@ -62,6 +62,41 @@
 
 static const char *TAG = "GUI_BMPfile";
 
+static UBYTE rgb_to_6color(UBYTE r, UBYTE g, UBYTE b)
+{
+    if      (r == 0   && g == 0   && b == 0  ) return 0; /* Black  */
+    else if (r == 255 && g == 255 && b == 255) return 1; /* White  */
+    else if (r == 255 && g == 255 && b == 0  ) return 2; /* Yellow */
+    else if (r == 255 && g == 0   && b == 0  ) return 3; /* Red    */
+    else if (r == 0   && g == 0   && b == 255) return 5; /* Blue   */
+    else if (r == 0   && b == 0   && g > 0   ) return 6; /* Green  */
+    else                                             return 1; /* White  */
+}
+
+static void set_6color_bmp_pixel(UWORD x,
+                                  UWORD y,
+                                  UWORD x_start,
+                                  UWORD y_start,
+                                  UWORD width,
+                                  UWORD height,
+                                  UBYTE color)
+{
+    UWORD out_x = x;
+    UWORD out_y = y;
+
+    if (width == Paint.Height && height == Paint.Width) {
+        out_x = y;
+        out_y = width - 1 - x;
+    }
+
+    out_x += x_start;
+    out_y += y_start;
+
+    if (out_x < Paint.Width && out_y < Paint.Height) {
+        Paint_SetPixel(out_x, out_y, color);
+    }
+}
+
 
 UBYTE GUI_ReadBmp(const char *path, UWORD Xstart, UWORD Ystart)
 {
@@ -521,6 +556,14 @@ UBYTE GUI_ReadBmp_RGB_6Color(const char *path, UWORD Xstart, UWORD Ystart)
 
     fseek(fp, bmpFileHeader.bOffset, SEEK_SET);
 
+    if (width == Paint.Height && height == Paint.Width) {
+        ESP_LOGI(TAG, "Auto-rotate portrait BMP: %ux%u -> %ux%u",
+                 (unsigned)width,
+                 (unsigned)height,
+                 (unsigned)Paint.Width,
+                 (unsigned)Paint.Height);
+    }
+
     /* BMP is stored bottom-up, so row 0 in file = bottom of image */
     for (UWORD y = 0; y < height; y++) {
         if (fread(row, 1, row_bytes, fp) != (size_t)row_bytes) {
@@ -532,17 +575,13 @@ UBYTE GUI_ReadBmp_RGB_6Color(const char *path, UWORD Xstart, UWORD Ystart)
             UBYTE b = row[x * 3];
             UBYTE g = row[x * 3 + 1];
             UBYTE r = row[x * 3 + 2];
-            UBYTE color;
-            if      (r == 0   && g == 0   && b == 0  ) color = 0; /* Black  */
-            else if (r == 255 && g == 255 && b == 255 ) color = 1; /* White  */
-            else if (r == 255 && g == 255 && b == 0  ) color = 2; /* Yellow */
-            else if (r == 255 && g == 0   && b == 0  ) color = 3; /* Red    */
-            else if (r == 0   && g == 0   && b == 255 ) color = 5; /* Blue   */
-            else if (r == 0   && b == 0   && g > 0   ) color = 6; /* Green (any pure green: 128 or 255) */
-            else                                        color = 1; /* default White */
-            if (Xstart + x < Paint.Width && Ystart + paint_y < Paint.Height) {
-                Paint_SetPixel(Xstart + x, Ystart + paint_y, color);
-            }
+            set_6color_bmp_pixel(x,
+                                  paint_y,
+                                  Xstart,
+                                  Ystart,
+                                  width,
+                                  height,
+                                  rgb_to_6color(r, g, b));
         }
     }
 

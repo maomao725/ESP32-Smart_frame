@@ -5,10 +5,12 @@
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
 #include <stdint.h>
+#include <sys/stat.h>
 
 static const char *TAG = "photo_client";
 
@@ -21,6 +23,11 @@ static const char *TAG = "photo_client";
 #define PHOTO_FETCH_MAX_ATTEMPTS  3
 #define PHOTO_PROGRESS_LOG_BYTES  102400   /* log every 100 KB */
 #define PHOTO_STALL_TIMEOUT_MS    20000    /* watchdog: abort if no progress for 20s */
+#define PHOTO_DISPLAY_WIDTH       800
+#define PHOTO_DISPLAY_HEIGHT      480
+#define PHOTO_COMPARE_BUF_SIZE    512
+
+static SemaphoreHandle_t s_download_lock;
 
 /* Watchdog shared state — written by download task, read by watchdog task */
 typedef struct {
@@ -72,6 +79,13 @@ static bool is_retryable_http_error(esp_err_t err) {
         || err == ESP_ERR_HTTP_CONNECTION_CLOSED
         || err == ESP_ERR_HTTP_READ_TIMEOUT
         || err == ESP_ERR_HTTP_INCOMPLETE_DATA;
+}
+
+static SemaphoreHandle_t get_download_lock(void) {
+    if (!s_download_lock) {
+        s_download_lock = xSemaphoreCreateMutex();
+    }
+    return s_download_lock;
 }
 
 static void log_heap_status(const char *stage) {
@@ -135,6 +149,16 @@ static esp_err_t validate_bmp_file(const char *path, size_t actual_size) {
 
     if (width == 0 || height == 0) {
         ESP_LOGE(TAG, "Invalid BMP dimensions: %" PRIu32 "x%" PRIu32, width, height);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    if (!((width == PHOTO_DISPLAY_WIDTH && height == PHOTO_DISPLAY_HEIGHT)
+          || (width == PHOTO_DISPLAY_HEIGHT && height == PHOTO_DISPLAY_WIDTH))) {
+        ESP_LOGE(TAG, "Unsupported BMP dimensions: %" PRIu32 "x%" PRIu32
+                 " (expected %dx%d or %dx%d)",
+                 width, height,
+                 PHOTO_DISPLAY_WIDTH, PHOTO_DISPLAY_HEIGHT,
+                 PHOTO_DISPLAY_HEIGHT, PHOTO_DISPLAY_WIDTH);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -352,7 +376,60 @@ cleanup:
     return err;
 }
 
+static bool files_are_equal(const char *left_path, const char *right_path) {
+    struct stat left_stat;
+    struct stat right_stat;
+    FILE *left = NULL;
+    FILE *right = NULL;
+    uint8_t left_buf[PHOTO_COMPARE_BUF_SIZE];
+    uint8_t right_buf[PHOTO_COMPARE_BUF_SIZE];
+    bool equal = false;
+
+    if (stat(left_path, &left_stat) != 0 || stat(right_path, &right_stat) != 0) {
+        return false;
+    }
+
+    if (left_stat.st_size != right_stat.st_size) {
+        return false;
+    }
+
+    left = fopen(left_path, "rb");
+    right = fopen(right_path, "rb");
+    if (!left || !right) {
+        goto cleanup;
+    }
+
+    while (1) {
+        size_t left_len = fread(left_buf, 1, sizeof(left_buf), left);
+        size_t right_len = fread(right_buf, 1, sizeof(right_buf), right);
+
+        if (left_len != right_len || memcmp(left_buf, right_buf, left_len) != 0) {
+            goto cleanup;
+        }
+
+        if (left_len < sizeof(left_buf)) {
+            equal = feof(left) && feof(right);
+            goto cleanup;
+        }
+    }
+
+cleanup:
+    if (left) {
+        fclose(left);
+    }
+    if (right) {
+        fclose(right);
+    }
+    return equal;
+}
+
 static esp_err_t finalize_download(void) {
+    if (files_are_equal(PHOTO_INCOMING_PATH, PHOTO_CURRENT_PATH)) {
+        remove(PHOTO_INCOMING_PATH);
+        ESP_LOGI(TAG, "Downloaded photo is unchanged; keeping current display");
+        return ESP_ERR_NOT_FOUND;
+    }
+
     remove(PHOTO_CURRENT_PATH);
     if (rename(PHOTO_INCOMING_PATH, PHOTO_CURRENT_PATH) != 0) {
         ESP_LOGE(TAG, "Failed to rename incoming photo to current photo");
@@ -366,6 +443,15 @@ static esp_err_t finalize_download(void) {
 esp_err_t photo_client_fetch_url(const char *url) {
     if (!url || url[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    SemaphoreHandle_t lock = get_download_lock();
+    if (!lock) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (xSemaphoreTake(lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_FAIL;
     }
 
     ESP_LOGI(TAG, "Fetching: %s", url);
@@ -388,14 +474,18 @@ esp_err_t photo_client_fetch_url(const char *url) {
 
     if (err == ESP_ERR_NOT_FOUND) {
         ESP_LOGI(TAG, "No new photo available");
+        xSemaphoreGive(lock);
         return ESP_ERR_NOT_FOUND;
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+        xSemaphoreGive(lock);
         return err;
     }
 
-    return finalize_download();
+    err = finalize_download();
+    xSemaphoreGive(lock);
+    return err;
 }
 
 esp_err_t photo_client_fetch(const char *base_url, const char *device_id) {

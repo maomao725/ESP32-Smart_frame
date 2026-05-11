@@ -5,4 +5,5 @@ idf_component_register(
         mqtt
         json
         photo_client
+        esp_http_client
 )

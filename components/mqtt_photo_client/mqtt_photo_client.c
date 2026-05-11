@@ -9,6 +9,7 @@
 
 #include "cJSON.h"
 #include "esp_event.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -27,8 +28,11 @@ static const char *TAG = "mqtt_photo";
 #define MQTT_PHOTO_PAYLOAD_MAX_LEN    512
 #define MQTT_PHOTO_BOUND_TOPIC_MAX_LEN 128
 #define MQTT_PHOTO_BIND_CODE_MAX_LEN   16
+#define MQTT_PHOTO_IP_ADDR_MAX_LEN     46
 #define MQTT_PHOTO_DEFAULT_KEEPALIVE   60
 #define MQTT_PHOTO_DEFAULT_QOS          1
+#define MQTT_PHOTO_HEARTBEAT_INTERVAL_SEC 60
+#define MQTT_PHOTO_PUBLIC_IP_TIMEOUT_MS 5000
 
 typedef enum {
     MQTT_PHOTO_REQUEST_NONE = 0,
@@ -51,6 +55,7 @@ typedef struct {
     esp_mqtt_client_handle_t client;
     QueueHandle_t request_queue;
     TaskHandle_t worker_task;
+    TaskHandle_t heartbeat_task;
     mqtt_photo_client_ready_cb_t on_photo_ready;
     mqtt_photo_client_bind_code_cb_t on_bind_code;
     mqtt_photo_client_bound_cb_t on_bound;
@@ -60,6 +65,7 @@ typedef struct {
     char password[MQTT_PHOTO_PASSWORD_MAX_LEN];
     char topic[MQTT_PHOTO_TOPIC_MAX_LEN];
     char bound_topic[MQTT_PHOTO_BOUND_TOPIC_MAX_LEN];
+    char heartbeat_topic[MQTT_PHOTO_BOUND_TOPIC_MAX_LEN];
     char client_id[MQTT_PHOTO_CLIENT_ID_MAX_LEN];
     char photo_base_url[MQTT_PHOTO_URL_MAX_LEN];
     char device_id[32];
@@ -72,7 +78,18 @@ typedef struct {
     int keepalive_sec;
 } mqtt_photo_client_ctx_t;
 
+typedef struct {
+    char data[MQTT_PHOTO_IP_ADDR_MAX_LEN];
+    int len;
+} public_ip_response_t;
+
 static mqtt_photo_client_ctx_t s_ctx = {0};
+
+static const char *s_public_ip_urls[] = {
+    "http://api.ipify.org",
+    "http://ipv4.icanhazip.com",
+    "http://ifconfig.me/ip",
+};
 
 static void copy_string(char *dst, size_t dst_size, const char *src) {
     if (!dst || dst_size == 0) {
@@ -179,7 +196,19 @@ static esp_err_t derive_bound_topic(const char *device_id, char *topic, size_t t
     return ESP_OK;
 }
 
-static int64_t current_registration_timestamp(void) {
+static esp_err_t derive_heartbeat_topic(const char *device_id, char *topic, size_t topic_size) {
+    if (!device_id || device_id[0] == '\0' || !topic || topic_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (snprintf(topic, topic_size, "device/%s/beat", device_id) >= (int)topic_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
+}
+
+static int64_t current_mqtt_timestamp(void) {
     time_t now = time(NULL);
 
     if (now > 0) {
@@ -190,6 +219,95 @@ static int64_t current_registration_timestamp(void) {
      * seconds when RTC/NTP is not available yet. */
     int64_t fallback = (int64_t)(esp_log_timestamp() / 1000);
     return fallback > 0 ? fallback : 1;
+}
+
+static bool is_ip_text_char(char ch) {
+    return (ch >= '0' && ch <= '9')
+        || (ch >= 'a' && ch <= 'f')
+        || (ch >= 'A' && ch <= 'F')
+        || ch == '.'
+        || ch == ':';
+}
+
+static esp_err_t public_ip_http_event_handler(esp_http_client_event_t *evt) {
+    public_ip_response_t *response = (public_ip_response_t *)evt->user_data;
+
+    if (!response || evt->event_id != HTTP_EVENT_ON_DATA || evt->data_len <= 0) {
+        return ESP_OK;
+    }
+
+    int copy_len = evt->data_len;
+    if (response->len + copy_len >= (int)sizeof(response->data)) {
+        copy_len = (int)sizeof(response->data) - response->len - 1;
+    }
+    if (copy_len <= 0) {
+        return ESP_OK;
+    }
+
+    memcpy(response->data + response->len, evt->data, copy_len);
+    response->len += copy_len;
+    response->data[response->len] = '\0';
+    return ESP_OK;
+}
+
+static esp_err_t fetch_public_ip_from_url(const char *url, char *out, size_t out_size) {
+    public_ip_response_t response = {0};
+    esp_http_client_config_t config = {
+        .url = url,
+        .event_handler = public_ip_http_event_handler,
+        .user_data = &response,
+        .timeout_ms = MQTT_PHOTO_PUBLIC_IP_TIMEOUT_MS,
+        .disable_auto_redirect = false,
+    };
+    esp_http_client_handle_t client = NULL;
+    esp_err_t err;
+    int status_code;
+
+    if (!out || out_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out[0] = '\0';
+
+    client = esp_http_client_init(&config);
+    if (!client) {
+        return ESP_FAIL;
+    }
+
+    err = esp_http_client_perform(client);
+    status_code = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK || status_code != 200) {
+        ESP_LOGW(TAG, "Public IP query failed: url=%s err=%s status=%d",
+                 url, esp_err_to_name(err), status_code);
+        return err != ESP_OK ? err : ESP_FAIL;
+    }
+
+    trim_inplace(response.data);
+    if (response.data[0] == '\0' || strlen(response.data) >= out_size) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    for (int i = 0; response.data[i] != '\0'; ++i) {
+        if (!is_ip_text_char(response.data[i])) {
+            ESP_LOGW(TAG, "Public IP response is not an IP address: %s", response.data);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+    }
+
+    copy_string(out, out_size, response.data);
+    return ESP_OK;
+}
+
+static esp_err_t resolve_heartbeat_ip(char *out, size_t out_size) {
+    for (size_t i = 0; i < sizeof(s_public_ip_urls) / sizeof(s_public_ip_urls[0]); ++i) {
+        if (fetch_public_ip_from_url(s_public_ip_urls[i], out, out_size) == ESP_OK) {
+            ESP_LOGI(TAG, "Heartbeat public IP: %s", out);
+            return ESP_OK;
+        }
+    }
+
+    ESP_LOGW(TAG, "Skip heartbeat: public IP is unavailable");
+    return ESP_FAIL;
 }
 
 static void publish_device_registration(mqtt_photo_client_ctx_t *ctx) {
@@ -220,7 +338,7 @@ static void publish_device_registration(mqtt_photo_client_ctx_t *ctx) {
 
     cJSON_AddStringToObject(root, "event", "reg_new_device");
     cJSON_AddStringToObject(root, "device_uid", ctx->device_id);
-    cJSON_AddNumberToObject(root, "timestamp", (double)current_registration_timestamp());
+    cJSON_AddNumberToObject(root, "timestamp", (double)current_mqtt_timestamp());
 
     payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -237,6 +355,79 @@ static void publish_device_registration(mqtt_photo_client_ctx_t *ctx) {
     }
 
     free(payload);
+}
+
+static void publish_device_heartbeat(mqtt_photo_client_ctx_t *ctx) {
+    char ip_addr[MQTT_PHOTO_IP_ADDR_MAX_LEN];
+    char *payload = NULL;
+    cJSON *root = NULL;
+    int msg_id = -1;
+
+    if (!ctx || !ctx->client) {
+        return;
+    }
+    if (ctx->device_id[0] == '\0' || ctx->heartbeat_topic[0] == '\0') {
+        ESP_LOGW(TAG, "Skip heartbeat publish: device_id or beat topic is empty");
+        return;
+    }
+
+    if (resolve_heartbeat_ip(ip_addr, sizeof(ip_addr)) != ESP_OK) {
+        return;
+    }
+
+    root = cJSON_CreateObject();
+    if (!root) {
+        ESP_LOGW(TAG, "Skip heartbeat publish: JSON alloc failed");
+        return;
+    }
+
+    cJSON_AddStringToObject(root, "event", "heart_beat");
+    cJSON_AddStringToObject(root, "device_uid", ctx->device_id);
+    cJSON_AddStringToObject(root, "ip_address", ip_addr);
+    cJSON_AddNumberToObject(root, "timestamp", (double)current_mqtt_timestamp());
+
+    payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!payload) {
+        ESP_LOGW(TAG, "Skip heartbeat publish: JSON encode failed");
+        return;
+    }
+
+    msg_id = esp_mqtt_client_publish(ctx->client, ctx->heartbeat_topic, payload, 0, MQTT_PHOTO_DEFAULT_QOS, 0);
+    if (msg_id < 0) {
+        ESP_LOGW(TAG, "Heartbeat publish failed: topic=%s", ctx->heartbeat_topic);
+    } else {
+        ESP_LOGI(TAG, "Heartbeat published: topic=%s msg_id=%d", ctx->heartbeat_topic, msg_id);
+    }
+
+    free(payload);
+}
+
+static void mqtt_photo_heartbeat_task(void *arg) {
+    mqtt_photo_client_ctx_t *ctx = (mqtt_photo_client_ctx_t *)arg;
+
+    while (ctx && ctx->client) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(MQTT_PHOTO_HEARTBEAT_INTERVAL_SEC * 1000));
+        publish_device_heartbeat(ctx);
+    }
+
+    vTaskDelete(NULL);
+}
+
+static void ensure_heartbeat_task(mqtt_photo_client_ctx_t *ctx) {
+    if (!ctx || ctx->heartbeat_task) {
+        return;
+    }
+
+    if (xTaskCreate(mqtt_photo_heartbeat_task,
+                    "mqtt_heartbeat",
+                    4096,
+                    ctx,
+                    3,
+                    &ctx->heartbeat_task) != pdPASS) {
+        ctx->heartbeat_task = NULL;
+        ESP_LOGW(TAG, "Heartbeat task create failed");
+    }
 }
 
 static bool topic_equals(const char *lhs, const char *rhs) {
@@ -601,6 +792,10 @@ static void mqtt_event_handler(void *handler_args,
                 esp_mqtt_client_subscribe(ctx->client, ctx->bound_topic, MQTT_PHOTO_DEFAULT_QOS);
             }
             publish_device_registration(ctx);
+            ensure_heartbeat_task(ctx);
+            if (ctx->heartbeat_task) {
+                xTaskNotifyGive(ctx->heartbeat_task);
+            }
             break;
 
         case MQTT_EVENT_DISCONNECTED:
@@ -633,6 +828,10 @@ static void cleanup_start_failure(mqtt_photo_client_ctx_t *ctx) {
     if (ctx->worker_task) {
         vTaskDelete(ctx->worker_task);
         ctx->worker_task = NULL;
+    }
+    if (ctx->heartbeat_task) {
+        vTaskDelete(ctx->heartbeat_task);
+        ctx->heartbeat_task = NULL;
     }
     if (ctx->request_queue) {
         vQueueDelete(ctx->request_queue);
@@ -676,6 +875,10 @@ esp_err_t mqtt_photo_client_start(const mqtt_photo_client_config_t *config,
     if (s_ctx.device_id[0] != '\0') {
         if (derive_bound_topic(s_ctx.device_id, s_ctx.bound_topic, sizeof(s_ctx.bound_topic)) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to derive bound topic from device_id");
+            return ESP_ERR_INVALID_SIZE;
+        }
+        if (derive_heartbeat_topic(s_ctx.device_id, s_ctx.heartbeat_topic, sizeof(s_ctx.heartbeat_topic)) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to derive heartbeat topic from device_id");
             return ESP_ERR_INVALID_SIZE;
         }
     }
@@ -724,10 +927,11 @@ esp_err_t mqtt_photo_client_start(const mqtt_photo_client_config_t *config,
         return err;
     }
 
-    ESP_LOGI(TAG, "MQTT photo client started: broker=%s topic=%s bound_topic=%s client_id=%s",
+    ESP_LOGI(TAG, "MQTT photo client started: broker=%s topic=%s bound_topic=%s beat_topic=%s client_id=%s",
              s_ctx.broker_url,
              s_ctx.subscribe_photo_topic ? s_ctx.topic : "(disabled)",
              s_ctx.bound_topic[0] ? s_ctx.bound_topic : "(none)",
+             s_ctx.heartbeat_topic[0] ? s_ctx.heartbeat_topic : "(none)",
              s_ctx.client_id);
     return ESP_OK;
 }
