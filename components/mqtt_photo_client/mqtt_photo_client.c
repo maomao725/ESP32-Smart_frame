@@ -41,6 +41,8 @@ typedef enum {
     MQTT_PHOTO_REQUEST_RELATIVE_PATH,
     MQTT_PHOTO_REQUEST_BIND_CODE,
     MQTT_PHOTO_REQUEST_BIND_CONFIRMED,
+    MQTT_PHOTO_REQUEST_INTERVAL,
+    MQTT_PHOTO_REQUEST_DAILY_TIME,
 } mqtt_photo_request_type_t;
 
 typedef struct {
@@ -49,6 +51,8 @@ typedef struct {
     char bind_code[MQTT_PHOTO_BIND_CODE_MAX_LEN];
     int expires_in;
     int timestamp;
+    int interval_seconds;
+    int daily_time_seconds;
 } mqtt_photo_request_t;
 
 typedef struct {
@@ -59,6 +63,8 @@ typedef struct {
     mqtt_photo_client_ready_cb_t on_photo_ready;
     mqtt_photo_client_bind_code_cb_t on_bind_code;
     mqtt_photo_client_bound_cb_t on_bound;
+    mqtt_photo_client_interval_cb_t on_interval;
+    mqtt_photo_client_daily_time_cb_t on_daily_time;
     void *user_ctx;
     char broker_url[MQTT_PHOTO_BROKER_URL_MAX_LEN];
     char username[MQTT_PHOTO_USERNAME_MAX_LEN];
@@ -466,6 +472,69 @@ static const cJSON *find_first_string_field(const cJSON *root,
     return NULL;
 }
 
+static int parse_positive_interval_seconds(const cJSON *root) {
+    const char *keys[] = {
+        "interval_seconds",
+        "hold_seconds",
+        "refresh_seconds",
+        "time",
+    };
+
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, keys[i]);
+        if (cJSON_IsNumber(item) && item->valuedouble > 0) {
+            return (int)item->valuedouble;
+        }
+        if (cJSON_IsString(item) && item->valuestring && item->valuestring[0] != '\0') {
+            int h = 0;
+            int m = 0;
+            int s = 0;
+            if (sscanf(item->valuestring, "%d:%d:%d", &h, &m, &s) == 3) {
+                int total = h * 3600 + m * 60 + s;
+                if (total > 0) {
+                    return total;
+                }
+            }
+
+            int seconds = atoi(item->valuestring);
+            if (seconds > 0) {
+                return seconds;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static int parse_daily_time_seconds(const cJSON *root) {
+    const char *keys[] = {
+        "daily_time",
+        "switch_time",
+        "switch_at",
+        "local_switch_time",
+    };
+
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, keys[i]);
+        if (cJSON_IsNumber(item) && item->valuedouble >= 0 && item->valuedouble < 24 * 3600) {
+            return (int)item->valuedouble;
+        }
+        if (cJSON_IsString(item) && item->valuestring && item->valuestring[0] != '\0') {
+            int h = 0;
+            int m = 0;
+            int s = 0;
+            int count = sscanf(item->valuestring, "%d:%d:%d", &h, &m, &s);
+            if (count == 2 || count == 3) {
+                if (h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60) {
+                    return h * 3600 + m * 60 + s;
+                }
+            }
+        }
+    }
+
+    return -1;
+}
+
 static esp_err_t resolve_payload_to_request(const char *payload, mqtt_photo_request_t *request) {
     char payload_copy[MQTT_PHOTO_PAYLOAD_MAX_LEN];
     cJSON *root = NULL;
@@ -475,6 +544,7 @@ static esp_err_t resolve_payload_to_request(const char *payload, mqtt_photo_requ
     }
 
     memset(request, 0, sizeof(*request));
+    request->daily_time_seconds = -1;
     copy_string(payload_copy, sizeof(payload_copy), payload);
     trim_inplace(payload_copy);
     if (payload_copy[0] == '\0') {
@@ -487,9 +557,13 @@ static esp_err_t resolve_payload_to_request(const char *payload, mqtt_photo_requ
         const cJSON *path_item = find_first_string_field(root, "path", "file", NULL);
         const cJSON *action_item = cJSON_GetObjectItemCaseSensitive(root, "action");
         const cJSON *refresh_item = cJSON_GetObjectItemCaseSensitive(root, "refresh");
+        int interval_seconds = parse_positive_interval_seconds(root);
+        int daily_time_seconds = parse_daily_time_seconds(root);
 
         if (url_item) {
             request->type = MQTT_PHOTO_REQUEST_URL;
+            request->interval_seconds = interval_seconds;
+            request->daily_time_seconds = daily_time_seconds;
             copy_string(request->value, sizeof(request->value), url_item->valuestring);
             cJSON_Delete(root);
             return ESP_OK;
@@ -499,6 +573,8 @@ static esp_err_t resolve_payload_to_request(const char *payload, mqtt_photo_requ
             request->type = is_absolute_url(path_item->valuestring)
                 ? MQTT_PHOTO_REQUEST_URL
                 : MQTT_PHOTO_REQUEST_RELATIVE_PATH;
+            request->interval_seconds = interval_seconds;
+            request->daily_time_seconds = daily_time_seconds;
             copy_string(request->value, sizeof(request->value), path_item->valuestring);
             cJSON_Delete(root);
             return ESP_OK;
@@ -508,6 +584,22 @@ static esp_err_t resolve_payload_to_request(const char *payload, mqtt_photo_requ
              && strcasecmp(action_item->valuestring, "refresh") == 0)
             || cJSON_IsTrue(refresh_item)) {
             request->type = MQTT_PHOTO_REQUEST_REFRESH;
+            request->interval_seconds = interval_seconds;
+            request->daily_time_seconds = daily_time_seconds;
+            cJSON_Delete(root);
+            return ESP_OK;
+        }
+
+        if (daily_time_seconds >= 0) {
+            request->type = MQTT_PHOTO_REQUEST_DAILY_TIME;
+            request->daily_time_seconds = daily_time_seconds;
+            cJSON_Delete(root);
+            return ESP_OK;
+        }
+
+        if (interval_seconds > 0) {
+            request->type = MQTT_PHOTO_REQUEST_INTERVAL;
+            request->interval_seconds = interval_seconds;
             cJSON_Delete(root);
             return ESP_OK;
         }
@@ -547,6 +639,7 @@ static esp_err_t resolve_bound_payload_to_request(const char *payload,
     }
 
     memset(request, 0, sizeof(*request));
+    request->daily_time_seconds = -1;
     root = cJSON_Parse(payload);
     if (!root) {
         ESP_LOGW(TAG, "Ignoring bound payload that is not valid JSON");
@@ -662,6 +755,28 @@ static void mqtt_photo_worker_task(void *arg) {
             if (ctx->on_bound) {
                 ctx->on_bound(ctx->user_ctx);
             }
+            continue;
+        }
+
+        if (request.interval_seconds > 0 && ctx->on_interval) {
+            ctx->on_interval(request.interval_seconds, ctx->user_ctx);
+        }
+
+        if (request.daily_time_seconds >= 0 && ctx->on_daily_time) {
+            ctx->on_daily_time(request.daily_time_seconds, ctx->user_ctx);
+        }
+
+        if (request.type == MQTT_PHOTO_REQUEST_INTERVAL) {
+            ESP_LOGI(TAG, "Received local refresh interval via MQTT: %ds",
+                     request.interval_seconds);
+            continue;
+        }
+
+        if (request.type == MQTT_PHOTO_REQUEST_DAILY_TIME) {
+            ESP_LOGI(TAG, "Received local daily refresh time via MQTT: %02d:%02d:%02d",
+                     request.daily_time_seconds / 3600,
+                     (request.daily_time_seconds % 3600) / 60,
+                     request.daily_time_seconds % 60);
             continue;
         }
 
@@ -843,6 +958,8 @@ esp_err_t mqtt_photo_client_start(const mqtt_photo_client_config_t *config,
                                   mqtt_photo_client_ready_cb_t on_photo_ready,
                                   mqtt_photo_client_bind_code_cb_t on_bind_code,
                                   mqtt_photo_client_bound_cb_t on_bound,
+                                  mqtt_photo_client_interval_cb_t on_interval,
+                                  mqtt_photo_client_daily_time_cb_t on_daily_time,
                                   void *user_ctx) {
     esp_err_t err = ESP_OK;
     esp_mqtt_client_config_t mqtt_cfg = {0};
@@ -867,6 +984,8 @@ esp_err_t mqtt_photo_client_start(const mqtt_photo_client_config_t *config,
     s_ctx.on_photo_ready = on_photo_ready;
     s_ctx.on_bind_code = on_bind_code;
     s_ctx.on_bound = on_bound;
+    s_ctx.on_interval = on_interval;
+    s_ctx.on_daily_time = on_daily_time;
     s_ctx.user_ctx = user_ctx;
 
     if (s_ctx.subscribe_photo_topic && s_ctx.topic[0] == '\0') {

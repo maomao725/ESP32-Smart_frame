@@ -10,6 +10,7 @@ idf_component_register(
         axp2101_bsp
         i2c_bsp
         sdcard_bsp
+        button_bsp
         photo_client
         mqtt_photo_client
         softap_prov
@@ -27,4 +28,5 @@ idf_component_register(
         json
         efuse
         mqtt
+        lwip
 )

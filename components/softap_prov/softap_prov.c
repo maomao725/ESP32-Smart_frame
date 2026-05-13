@@ -439,6 +439,20 @@ const char *softap_prov_get_ap_ip(void)
     return s_prov_ctx ? s_prov_ctx->ap_ip : NULL;
 }
 
+static void draw_cn_line(UWORD y, const char *text)
+{
+    if (text && text[0]) {
+        Paint_DrawString_CN(50, y, text, &Font24CN, EPD_7IN3E_BLACK, EPD_7IN3E_WHITE);
+    }
+}
+
+static void draw_en_line(UWORD y, const char *text)
+{
+    if (text && text[0]) {
+        Paint_DrawString_EN(50, y, text, &Font24, EPD_7IN3E_BLACK, EPD_7IN3E_WHITE);
+    }
+}
+
 void softap_prov_stop(void)
 {
     if (!s_prov_ctx) return;
@@ -479,83 +493,64 @@ void softap_prov_draw_screen(uint8_t *img_buf,
 
     Paint_Clear(EPD_7IN3E_WHITE);
 
-    char line1[64], line2[64], line3[64], line4[64];
-
     switch (state) {
         case SOFTAP_STATE_IDLE:
         case SOFTAP_STATE_SCANNING:
-            snprintf(line1, sizeof(line1), "Connect hotspot");
-            snprintf(line2, sizeof(line2), "%s", ap_name);
-            snprintf(line3, sizeof(line3), "Open browser");
-            snprintf(line4, sizeof(line4), "IP: %s", ap_ip);
+            draw_cn_line(100, "连接相框热点");
+            draw_en_line(150, ap_name);
+            draw_cn_line(200, "浏览器打开地址");
+            draw_en_line(250, ap_ip);
             break;
 
         case SOFTAP_STATE_CONNECTING:
-            snprintf(line1, sizeof(line1), "Connecting Wi-Fi");
-            snprintf(line2, sizeof(line2), "Please wait...");
-            line3[0] = '\0';
-            line4[0] = '\0';
+            draw_cn_line(100, "正在连接无线");
+            draw_cn_line(150, "请稍等");
             break;
 
         case SOFTAP_STATE_GETTING_BIND_CODE:
-            snprintf(line1, sizeof(line1), "Wi-Fi connected");
-            snprintf(line2, sizeof(line2), "Requesting bind code");
-            line3[0] = '\0';
-            line4[0] = '\0';
+            draw_cn_line(100, "无线已连接");
+            draw_cn_line(150, "正在获取绑定码");
             break;
 
         case SOFTAP_STATE_CONNECTED:
             if (bind_code && bind_code[0]) {
-                snprintf(line1, sizeof(line1), "Wi-Fi connected");
-                snprintf(line2, sizeof(line2), "Bind code: %s", bind_code);
-                snprintf(line3, sizeof(line3), "Valid for 5 min");
-                snprintf(line4, sizeof(line4), "Device: %s", device_id);
+                draw_cn_line(100, "无线已连接");
+                draw_cn_line(150, "绑定码");
+                draw_en_line(200, bind_code);
+                draw_cn_line(250, "五分钟内有效");
+                draw_en_line(300, device_id);
             } else {
-                snprintf(line1, sizeof(line1), "Wi-Fi connected");
-                snprintf(line2, sizeof(line2), "Requesting bind code");
-                line3[0] = '\0';
-                line4[0] = '\0';
+                draw_cn_line(100, "无线已连接");
+                draw_cn_line(150, "正在获取绑定码");
             }
             break;
 
         case SOFTAP_STATE_WAITING_BIND:
             if (bind_code && bind_code[0]) {
-                snprintf(line1, sizeof(line1), "Enter bind code");
-                snprintf(line2, sizeof(line2), "Code: %s", bind_code);
-                snprintf(line3, sizeof(line3), "Valid for 5 min");
-                snprintf(line4, sizeof(line4), "Device: %s", device_id);
+                draw_cn_line(100, "请输入绑定码");
+                draw_en_line(150, bind_code);
+                draw_cn_line(200, "五分钟内有效");
+                draw_en_line(250, device_id);
             } else {
-                snprintf(line1, sizeof(line1), "Wi-Fi connected");
-                snprintf(line2, sizeof(line2), "Waiting for bind...");
-                line3[0] = '\0';
-                line4[0] = '\0';
+                draw_cn_line(100, "无线已连接");
+                draw_cn_line(150, "等待绑定");
             }
             break;
 
         case SOFTAP_STATE_BOUND:
-            snprintf(line1, sizeof(line1), "Bound successfully");
-            snprintf(line2, sizeof(line2), "Device: %s", device_id);
-            line3[0] = '\0';
-            line4[0] = '\0';
+            draw_cn_line(100, "绑定成功");
+            draw_cn_line(150, "设备");
+            draw_en_line(200, device_id);
             break;
 
         case SOFTAP_STATE_FAILED:
-            snprintf(line1, sizeof(line1), "Wi-Fi failed");
-            snprintf(line2, sizeof(line2), "Check password");
-            snprintf(line3, sizeof(line3), "Restarting...");
-            line4[0] = '\0';
+            draw_cn_line(100, "无线连接失败");
+            draw_cn_line(150, "请检查密码");
+            draw_cn_line(200, "即将重启");
             break;
 
         default:
-            snprintf(line1, sizeof(line1), "Provisioning...");
-            line2[0] = '\0';
-            line3[0] = '\0';
-            line4[0] = '\0';
+            draw_cn_line(100, "配网中");
             break;
     }
-
-    Paint_DrawString_EN(50, 100, line1, &Font24, EPD_7IN3E_BLACK, EPD_7IN3E_WHITE);
-    if (line2[0]) Paint_DrawString_EN(50, 150, line2, &Font24, EPD_7IN3E_BLACK, EPD_7IN3E_WHITE);
-    if (line3[0]) Paint_DrawString_EN(50, 200, line3, &Font24, EPD_7IN3E_BLACK, EPD_7IN3E_WHITE);
-    if (line4[0]) Paint_DrawString_EN(50, 250, line4, &Font24, EPD_7IN3E_BLACK, EPD_7IN3E_WHITE);
 }

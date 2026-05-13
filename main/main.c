@@ -1,6 +1,13 @@
 #include <stdbool.h>
+#include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -11,6 +18,7 @@
 #include "esp_netif.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_sntp.h"
 #include "nvs_flash.h"
 #include "mqtt_client.h"
 
@@ -24,6 +32,7 @@
 #include "photo_client.h"
 #include "mqtt_photo_client.h"
 #include "softap_prov.h"
+#include "button_bsp.h"
 #include "esp_http_client.h"
 #include "cJSON.h"
 
@@ -35,11 +44,49 @@ static uint8_t  *s_img_buf  = NULL;
 static uint32_t  s_img_size = 0;
 static SemaphoreHandle_t s_display_lock = NULL;
 
+typedef enum {
+    PHOTO_MODE_MQTT_LIVE = 0,
+    PHOTO_MODE_LOCAL_TIMED = 1,
+} photo_mode_t;
+
+#define LOCAL_PHOTO_DIR "/sdcard/LOCAL"
+#define LOCAL_PHOTO_NAME_MAX 96
+#define LOCAL_DEFAULT_INTERVAL_SEC 300
+#define DISPLAY_MIN_STAY_SEC 20
+#define LOCAL_MIN_INTERVAL_SEC DISPLAY_MIN_STAY_SEC
+#define LOCAL_MAX_INTERVAL_SEC (24 * 3600)
+#define LOCAL_COPY_BUF_SIZE 512
+
+static volatile photo_mode_t s_photo_mode = PHOTO_MODE_MQTT_LIVE;
+static volatile int s_local_interval_sec = LOCAL_DEFAULT_INTERVAL_SEC;
+static volatile TickType_t s_next_local_refresh_tick = 0;
+static volatile TickType_t s_last_display_refresh_tick = 0;
+static volatile bool s_local_daily_enabled = false;
+static volatile int s_local_daily_seconds = -1;
+static volatile time_t s_next_daily_refresh_time = 0;
+static size_t s_local_next_index = 0;
+static uint32_t s_local_store_seq = 0;
+
 static void log_heap(const char *stage)
 {
     ESP_LOGI(TAG, "%s heap: internal=%u spiram=%u", stage,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+static void start_time_sync(void)
+{
+    setenv("TZ", "CST-8", 1);
+    tzset();
+
+    if (esp_sntp_enabled()) {
+        return;
+    }
+
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "ntp.aliyun.com");
+    esp_sntp_init();
+    ESP_LOGI(TAG, "SNTP time sync started");
 }
 
 static uint8_t *alloc_display_buffer(size_t size)
@@ -116,11 +163,351 @@ static void display_photo(const char *path)
 {
     if (!s_img_buf) return;
     if (!take_display_lock()) return;
+
+    TickType_t now = xTaskGetTickCount();
+    TickType_t last = s_last_display_refresh_tick;
+    const TickType_t min_stay_ticks = pdMS_TO_TICKS(DISPLAY_MIN_STAY_SEC * 1000);
+
+    if (last != 0 && (now - last) < min_stay_ticks) {
+        vTaskDelay(min_stay_ticks - (now - last));
+    }
+
     Paint_Clear(EPD_7IN3E_WHITE);
     GUI_ReadBmp_RGB_6Color(path, 0, 0);
     epaper_port_display(s_img_buf);
+    s_last_display_refresh_tick = xTaskGetTickCount();
     give_display_lock();
     ESP_LOGI(TAG, "Display refreshed: %s", path);
+}
+
+static bool file_exists(const char *path)
+{
+    struct stat st;
+    return path && stat(path, &st) == 0;
+}
+
+static bool is_bmp_filename(const char *name)
+{
+    size_t len;
+
+    if (!name) {
+        return false;
+    }
+
+    len = strlen(name);
+    return len > 4
+        && name[len - 4] == '.'
+        && tolower((unsigned char)name[len - 3]) == 'b'
+        && tolower((unsigned char)name[len - 2]) == 'm'
+        && tolower((unsigned char)name[len - 1]) == 'p';
+}
+
+static esp_err_t ensure_local_photo_dir(void)
+{
+    if (mkdir(LOCAL_PHOTO_DIR, 0775) == 0 || errno == EEXIST) {
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG, "Failed to create local photo dir: %s errno=%d",
+             LOCAL_PHOTO_DIR,
+             errno);
+    return ESP_FAIL;
+}
+
+static esp_err_t copy_file(const char *src_path, const char *dst_path)
+{
+    FILE *src = NULL;
+    FILE *dst = NULL;
+    uint8_t buf[LOCAL_COPY_BUF_SIZE];
+    esp_err_t ret = ESP_FAIL;
+
+    src = fopen(src_path, "rb");
+    if (!src) {
+        ESP_LOGE(TAG, "Failed to open source file: %s", src_path);
+        goto cleanup;
+    }
+
+    dst = fopen(dst_path, "wb");
+    if (!dst) {
+        ESP_LOGE(TAG, "Failed to open destination file: %s", dst_path);
+        goto cleanup;
+    }
+
+    while (1) {
+        size_t len = fread(buf, 1, sizeof(buf), src);
+        if (len > 0 && fwrite(buf, 1, len, dst) != len) {
+            ESP_LOGE(TAG, "Failed to write local photo: %s", dst_path);
+            goto cleanup;
+        }
+
+        if (len < sizeof(buf)) {
+            ret = feof(src) ? ESP_OK : ESP_FAIL;
+            goto cleanup;
+        }
+    }
+
+cleanup:
+    if (src) {
+        fclose(src);
+    }
+    if (dst) {
+        fclose(dst);
+    }
+    if (ret != ESP_OK) {
+        remove(dst_path);
+    }
+    return ret;
+}
+
+static esp_err_t store_current_photo_to_local_pool(void)
+{
+    char dst_path[LOCAL_PHOTO_NAME_MAX];
+    bool found_free_path = false;
+
+    if (!file_exists(FRAME_PHOTO_PATH)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (ensure_local_photo_dir() != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    for (int i = 0; i < 10000; ++i) {
+        snprintf(dst_path,
+                 sizeof(dst_path),
+                 LOCAL_PHOTO_DIR "/P%07" PRIu32 ".BMP",
+                 ++s_local_store_seq);
+        if (!file_exists(dst_path)) {
+            found_free_path = true;
+            break;
+        }
+    }
+
+    if (!found_free_path) {
+        ESP_LOGE(TAG, "Failed to find free local photo path in %s", LOCAL_PHOTO_DIR);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = copy_file(FRAME_PHOTO_PATH, dst_path);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Cached MQTT photo for local timed mode: %s", dst_path);
+    }
+    return ret;
+}
+
+static bool select_local_photo(char *out_path, size_t out_size)
+{
+    DIR *dir = NULL;
+    struct dirent *entry = NULL;
+    size_t count = 0;
+    size_t target = 0;
+    size_t index = 0;
+    bool found = false;
+
+    if (!out_path || out_size == 0 || ensure_local_photo_dir() != ESP_OK) {
+        return false;
+    }
+
+    dir = opendir(LOCAL_PHOTO_DIR);
+    if (!dir) {
+        return false;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (is_bmp_filename(entry->d_name)) {
+            count++;
+        }
+    }
+    closedir(dir);
+
+    if (count == 0) {
+        return false;
+    }
+
+    target = s_local_next_index % count;
+    dir = opendir(LOCAL_PHOTO_DIR);
+    if (!dir) {
+        return false;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (!is_bmp_filename(entry->d_name)) {
+            continue;
+        }
+
+        if (index == target) {
+            snprintf(out_path, out_size, LOCAL_PHOTO_DIR "/%s", entry->d_name);
+            found = true;
+            break;
+        }
+        index++;
+    }
+
+    closedir(dir);
+
+    if (found) {
+        s_local_next_index = (target + 1) % count;
+    }
+    return found;
+}
+
+static bool display_next_local_photo(void)
+{
+    char path[LOCAL_PHOTO_NAME_MAX];
+
+    if (!select_local_photo(path, sizeof(path))) {
+        ESP_LOGW(TAG, "Local timed mode has no BMP files in %s", LOCAL_PHOTO_DIR);
+        return false;
+    }
+
+    display_photo(path);
+    return true;
+}
+
+static bool is_wall_clock_ready(void)
+{
+    return time(NULL) > 1700000000;
+}
+
+static time_t next_daily_refresh_time(time_t now, int seconds_since_midnight)
+{
+    struct tm local_now;
+
+    if (seconds_since_midnight < 0) {
+        return 0;
+    }
+
+    localtime_r(&now, &local_now);
+    local_now.tm_hour = seconds_since_midnight / 3600;
+    local_now.tm_min = (seconds_since_midnight % 3600) / 60;
+    local_now.tm_sec = seconds_since_midnight % 60;
+
+    time_t target = mktime(&local_now);
+    if (target <= now) {
+        target += 24 * 3600;
+    }
+    return target;
+}
+
+static void schedule_next_daily_refresh(time_t now)
+{
+    if (!s_local_daily_enabled || !is_wall_clock_ready()) {
+        s_next_daily_refresh_time = 0;
+        return;
+    }
+
+    s_next_daily_refresh_time = next_daily_refresh_time(now, s_local_daily_seconds);
+}
+
+static void set_local_interval_seconds(int seconds)
+{
+    if (seconds < LOCAL_MIN_INTERVAL_SEC) {
+        seconds = LOCAL_MIN_INTERVAL_SEC;
+    } else if (seconds > LOCAL_MAX_INTERVAL_SEC) {
+        seconds = LOCAL_MAX_INTERVAL_SEC;
+    }
+
+    s_local_interval_sec = seconds;
+    s_local_daily_enabled = false;
+    s_next_daily_refresh_time = 0;
+    if (s_photo_mode == PHOTO_MODE_LOCAL_TIMED) {
+        s_next_local_refresh_tick = xTaskGetTickCount() + pdMS_TO_TICKS(seconds * 1000);
+    }
+    ESP_LOGI(TAG, "Local timed refresh interval set to %ds", seconds);
+}
+
+static void set_local_daily_time_seconds(int seconds_since_midnight)
+{
+    if (seconds_since_midnight < 0) {
+        seconds_since_midnight = 0;
+    } else if (seconds_since_midnight >= 24 * 3600) {
+        seconds_since_midnight = (24 * 3600) - 1;
+    }
+
+    s_local_daily_seconds = seconds_since_midnight;
+    s_local_daily_enabled = true;
+    s_next_local_refresh_tick = 0;
+    schedule_next_daily_refresh(time(NULL));
+
+    ESP_LOGI(TAG, "Local daily refresh time set to %02d:%02d:%02d, next=%lld",
+             seconds_since_midnight / 3600,
+             (seconds_since_midnight % 3600) / 60,
+             seconds_since_midnight % 60,
+             (long long)s_next_daily_refresh_time);
+}
+
+static void local_photo_timer_task(void *arg)
+{
+    (void)arg;
+
+    while (1) {
+        if (s_photo_mode == PHOTO_MODE_LOCAL_TIMED) {
+            if (s_local_daily_enabled) {
+                time_t now = time(NULL);
+
+                if (is_wall_clock_ready()) {
+                    if (s_next_daily_refresh_time == 0) {
+                        schedule_next_daily_refresh(now);
+                    }
+                    if (s_next_daily_refresh_time > 0 && now >= s_next_daily_refresh_time) {
+                        display_next_local_photo();
+                        s_next_daily_refresh_time = next_daily_refresh_time(now, s_local_daily_seconds);
+                    }
+                }
+            } else {
+                TickType_t now = xTaskGetTickCount();
+                TickType_t next = s_next_local_refresh_tick;
+
+                if (next == 0 || now >= next) {
+                    display_next_local_photo();
+                    s_next_local_refresh_tick = now + pdMS_TO_TICKS(s_local_interval_sec * 1000);
+                }
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+static void toggle_photo_mode(void)
+{
+    if (s_photo_mode == PHOTO_MODE_MQTT_LIVE) {
+        s_photo_mode = PHOTO_MODE_LOCAL_TIMED;
+        if (s_local_daily_enabled) {
+            schedule_next_daily_refresh(time(NULL));
+        } else {
+            s_next_local_refresh_tick = xTaskGetTickCount();
+        }
+        ESP_LOGI(TAG, "Photo mode switched to LOCAL_TIMED; interval=%ds dir=%s",
+                 s_local_interval_sec,
+                 LOCAL_PHOTO_DIR);
+        return;
+    }
+
+    s_photo_mode = PHOTO_MODE_MQTT_LIVE;
+    s_next_local_refresh_tick = 0;
+    ESP_LOGI(TAG, "Photo mode switched to MQTT_LIVE");
+    if (file_exists(FRAME_PHOTO_PATH)) {
+        display_photo(FRAME_PHOTO_PATH);
+    }
+}
+
+static void mode_button_task(void *arg)
+{
+    (void)arg;
+
+    xEventGroupClearBits(key_groups, set_bit_button(0) | set_bit_button(1) | set_bit_button(2));
+    ESP_LOGI(TAG, "KEY1 long press toggles photo mode");
+
+    while (1) {
+        xEventGroupWaitBits(key_groups,
+                            set_bit_button(1),
+                            pdTRUE,
+                            pdFALSE,
+                            portMAX_DELAY);
+        ESP_LOGI(TAG, "KEY1 long press detected");
+        toggle_photo_mode();
+    }
 }
 
 /* ── SoftAP provisioning ────────────────────────────────────────────────────── */
@@ -567,7 +954,18 @@ static void on_photo_ready(const char *path, void *user_ctx)
 {
     frame_config_t *cfg = (frame_config_t *)user_ctx;
 
-    display_photo(path);
+    esp_err_t store_ret = store_current_photo_to_local_pool();
+
+    if (s_photo_mode == PHOTO_MODE_LOCAL_TIMED) {
+        if (store_ret == ESP_OK) {
+            ESP_LOGI(TAG, "Local timed mode: MQTT photo cached without display refresh");
+        }
+    } else {
+        if (store_ret == ESP_OK) {
+            ESP_LOGI(TAG, "MQTT live mode: photo cached for local timed mode");
+        }
+        display_photo(path);
+    }
 
     if (!cfg || cfg->bind_status == BIND_STATUS_BOUND) {
         return;
@@ -586,6 +984,18 @@ static void on_photo_ready(const char *path, void *user_ctx)
     }
 
     ESP_LOGI(TAG, "First photo received during bind wait, treating device as bound");
+}
+
+static void on_local_interval_received(int interval_seconds, void *user_ctx)
+{
+    (void)user_ctx;
+    set_local_interval_seconds(interval_seconds);
+}
+
+static void on_local_daily_time_received(int seconds_since_midnight, void *user_ctx)
+{
+    (void)user_ctx;
+    set_local_daily_time_seconds(seconds_since_midnight);
 }
 
 static void on_bind_code_received(const char *bind_code, int expires_in, int timestamp, void *user_ctx)
@@ -715,6 +1125,7 @@ void app_main(void)
         ESP_LOGE(TAG, "WiFi connect failed — halting");
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
+    start_time_sync();
 
     if (cfg->bind_status != BIND_STATUS_BOUND && !has_mqtt_config(cfg)) {
         refresh_bind_status_from_cloud(cfg);
@@ -730,6 +1141,10 @@ void app_main(void)
         ESP_LOGE(TAG, "Display buffer init failed — halting");
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
+
+    button_Init();
+    xTaskCreate(mode_button_task, "mode_button", 4 * 1024, NULL, 3, NULL);
+    xTaskCreate(local_photo_timer_task, "local_photo", 6 * 1024, NULL, 2, NULL);
 
     if (requires_initial_binding(cfg)) {
         mqtt_photo_client_config_t bind_only_cfg = {
@@ -758,6 +1173,8 @@ void app_main(void)
                                           on_photo_ready,
                                           on_bind_code_received,
                                           on_bound_received,
+                                          on_local_interval_received,
+                                          on_local_daily_time_received,
                                           cfg);
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "MQTT bind-only client start failed: %s", esp_err_to_name(ret));
@@ -787,6 +1204,8 @@ void app_main(void)
                                       on_photo_ready,
                                       on_bind_code_received,
                                       on_bound_received,
+                                      on_local_interval_received,
+                                      on_local_daily_time_received,
                                       cfg);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "MQTT client start failed: %s", esp_err_to_name(ret));
