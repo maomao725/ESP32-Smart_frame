@@ -1,7 +1,0 @@
-{
-  "wifi_ssid": "maomao",
-  "wifi_password": "y20050725",
-  "mqtt_broker_url": "mqtt://47.108.232.40:1883",
-  "mqtt_username": "screen_test1",
-  "mqtt_password": "screen_test1"
-}

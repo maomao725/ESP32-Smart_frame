@@ -1,0 +1,43 @@
+<!-- pages/bind/bind.wxml -->
+<view class="container">
+
+  <view class="header">
+    <text class="title">绑定相框</text>
+    <text class="subtitle">输入相框屏幕上显示的6位绑定码</text>
+  </view>
+
+  <!-- 绑定码输入 -->
+  <view class="input-wrap">
+    <input
+      class="code-input"
+      placeholder="例如：A3F7K2"
+      maxlength="6"
+      value="{{bindCode}}"
+      bindinput="onCodeInput"
+      placeholder-style="color:#bbb"
+    />
+  </view>
+
+  <button
+    class="btn-primary bind-btn"
+    bindtap="bindDevice"
+    disabled="{{bindCode.length < 6 || binding}}"
+  >
+    {{binding ? '绑定中...' : '确认绑定'}}
+  </button>
+
+  <!-- 结果提示 -->
+  <view wx:if="{{resultMsg}}" class="result-msg {{resultOk ? 'ok' : 'err'}}">
+    <text>{{resultMsg}}</text>
+  </view>
+
+  <!-- 说明 -->
+  <view class="tips">
+    <text class="tips-title">如何获取绑定码？</text>
+    <text class="tips-item">1. 给相框插上电源并连接养老院WiFi</text>
+    <text class="tips-item">2. 相框屏幕会显示一个6位绑定码</text>
+    <text class="tips-item">3. 在此输入该绑定码完成绑定</text>
+    <text class="tips-item">4. 绑定成功后即可发送照片</text>
+  </view>
+
+</view>

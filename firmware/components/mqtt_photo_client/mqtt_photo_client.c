@@ -92,6 +92,7 @@ typedef struct {
 static mqtt_photo_client_ctx_t s_ctx = {0};
 
 static const char *s_public_ip_urls[] = {
+    "http://4.ipw.cn",
     "http://api.ipify.org",
     "http://ipv4.icanhazip.com",
     "http://ifconfig.me/ip",

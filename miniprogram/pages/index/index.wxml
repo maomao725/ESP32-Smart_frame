@@ -1,0 +1,44 @@
+<!-- pages/index/index.wxml -->
+<view class="container">
+
+  <!-- 顶部标题 -->
+  <view class="header">
+    <text class="title">给奶奶发照片</text>
+    <text class="subtitle">照片会立刻显示在养老院的相框上</text>
+  </view>
+
+  <!-- 状态栏 -->
+  <view class="status-bar {{frameOnline ? 'online' : 'offline'}}">
+    <view class="status-dot"></view>
+    <text>相框状态：{{frameOnline ? '在线' : '离线或未绑定'}}</text>
+  </view>
+
+  <!-- 图片预览区 -->
+  <view class="preview-area" bindtap="choosePhoto">
+    <image wx:if="{{previewSrc}}" src="{{previewSrc}}" mode="aspectFit" class="preview-img"/>
+    <view wx:else class="placeholder">
+      <text class="placeholder-icon">📷</text>
+      <text class="placeholder-text">点击选择照片</text>
+    </view>
+  </view>
+
+  <!-- 发送按钮 -->
+  <button
+    class="btn-primary send-btn"
+    bindtap="sendPhoto"
+    disabled="{{!previewSrc || sending}}"
+  >
+    {{sending ? '发送中...' : '发送给奶奶 ❤️'}}
+  </button>
+
+  <!-- 发送结果提示 -->
+  <view wx:if="{{resultMsg}}" class="result-msg {{resultOk ? 'ok' : 'err'}}">
+    <text>{{resultMsg}}</text>
+  </view>
+
+  <!-- 底部：去绑定相框 -->
+  <view class="footer">
+    <text class="link" bindtap="goToBind">还没绑定相框？点这里</text>
+  </view>
+
+</view>

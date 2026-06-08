@@ -1,0 +1,92 @@
+/* pages/bind/bind.wxss */
+.container {
+  padding: 40rpx 32rpx;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 60rpx;
+}
+
+.title {
+  display: block;
+  font-size: 48rpx;
+  font-weight: bold;
+  color: #2d4a35;
+}
+
+.subtitle {
+  display: block;
+  font-size: 26rpx;
+  color: #888;
+  margin-top: 8rpx;
+}
+
+.input-wrap {
+  width: 100%;
+  margin-bottom: 40rpx;
+}
+
+.code-input {
+  width: 100%;
+  height: 100rpx;
+  background: #fff;
+  border-radius: 16rpx;
+  border: 2rpx solid #c8d8c0;
+  text-align: center;
+  font-size: 52rpx;
+  font-weight: bold;
+  letter-spacing: 16rpx;
+  color: #2d4a35;
+  box-sizing: border-box;
+  padding: 0 20rpx;
+}
+
+.bind-btn {
+  width: 100%;
+  font-size: 36rpx;
+  padding: 28rpx 0;
+  border-radius: 16rpx;
+  margin-bottom: 32rpx;
+}
+
+.result-msg {
+  padding: 20rpx 32rpx;
+  border-radius: 12rpx;
+  font-size: 28rpx;
+  text-align: center;
+  margin-bottom: 40rpx;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.result-msg.ok  { background: #e6f4ea; color: #2d7a3a; }
+.result-msg.err { background: #fce8e8; color: #c0392b; }
+
+.tips {
+  width: 100%;
+  background: #fff;
+  border-radius: 16rpx;
+  padding: 32rpx;
+  box-sizing: border-box;
+  margin-top: auto;
+}
+
+.tips-title {
+  display: block;
+  font-size: 28rpx;
+  font-weight: bold;
+  color: #4a7c59;
+  margin-bottom: 20rpx;
+}
+
+.tips-item {
+  display: block;
+  font-size: 26rpx;
+  color: #666;
+  line-height: 1.8;
+}
